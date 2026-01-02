@@ -1,90 +1,107 @@
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework import status, viewsets
-from rest_framework.permissions import IsAuthenticated
-from apps.attendance.models import AttendanceSession
 from django.utils import timezone
 from django.db.models import Sum
 
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status, viewsets
+from rest_framework.permissions import IsAuthenticated
 
-from .services import AttendanceService
+from apps.attendance.models import WorkSession, AttendanceDaySummary
+from apps.attendance import services
+from apps.attendance.exceptions import (
+    AlreadyClockedInError,
+    NotClockedInError,
+)
 from .serializers import WorkSessionSerializer, AttendanceDaySummarySerializer
-from .models import WorkSession, AttendanceDaySummary
 
 class ClockInView(APIView):
     """
-    Endpoint to start a work session.
+    Start a work session for the authenticated employee.
     """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        # ==========================================================
-        # LOGIC: Use the currently logged-in user as the employee
-        # ==========================================================
         employee = request.user
-        
-        try:
-            # Call our Service to handle the database creation
-            session = AttendanceService.clock_in(employee, source="WEB")
-            
-            # Serialize the new session to return to the frontend
-            serializer = WorkSessionSerializer(session)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-            
-        except Exception as e:
-            # Highlight: Returns the error message if already clocked in
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+        try:
+            session = services.clock_in(employee, source="WEB")
+        except AlreadyClockedInError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = WorkSessionSerializer(session)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 class ClockOutView(APIView):
     """
-    Endpoint to end the current active work session.
+    End the current active work session for the authenticated employee.
     """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         employee = request.user
-        
+
         try:
-            # Call our Service to calculate duration and close the session
-            session = AttendanceService.clock_out(employee, source="WEB")
-            
-            # Highlight: We calculate earnings immediately upon clock-out
-            earnings = AttendanceService.calculate_earnings(session)
-            
-            serializer = WorkSessionSerializer(session)
-            data = serializer.data
-            data['session_earnings'] = earnings  # Add earnings to the response
-            
-            return Response(data, status=status.HTTP_200_OK)
-            
-        except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            session = services.clock_out(employee, source="WEB")
+        except NotClockedInError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = WorkSessionSerializer(session)
+        return Response(serializer.data, status=status.HTTP_200_OK)
         
 class WorkSessionViewSet(viewsets.ReadOnlyModelViewSet):
     """
-    Provides the list of all work sessions (e.g., /api/v1/attendance/sessions/)
+    Read-only access to work sessions.
     """
-    queryset = WorkSession.objects.all()
+    queryset = WorkSession.objects.all().select_related("employee")
     serializer_class = WorkSessionSerializer
     permission_classes = [IsAuthenticated]
 
+    def get_queryset(self):
+        return self.queryset.filter(employee=self.request.user) # for security
+
 class AttendanceDaySummaryViewSet(viewsets.ReadOnlyModelViewSet):
     """
-    Provides the daily totals (e.g., /api/v1/attendance/summaries/)
+    Read-only access to daily attendance summaries.
     """
-    queryset = AttendanceDaySummary.objects.all()
+    queryset = AttendanceDaySummary.objects.all().select_related("employee")
     serializer_class = AttendanceDaySummarySerializer
     permission_classes = [IsAuthenticated]
 
+    def get_queryset(self):
+        return self.queryset.filter(employee=self.request.user)
+
 class DailyReportView(APIView):
+    """
+    Simple daily report for the authenticated employee.
+    """
+    permission_classes = [IsAuthenticated]
+
     def get(self, request):
         today = timezone.now().date()
-        sessions = AttendanceSession.objects.filter(work_date=today)
-        
-        return Response({
-            "date": today,
-            "total_active_employees": sessions.filter(clock_out__isnull=True).count(),
-            "total_hours_today": sessions.aggregate(Sum('duration'))['duration__sum'] or 0,
-        })
+        employee = request.user
+
+        sessions = WorkSession.objects.filter(
+            employee=employee,
+            work_date=today,
+        )
+
+        total_seconds = (
+            sessions.aggregate(total=Sum("total_work_duration"))["total"] or 0
+        )
+
+        return Response(
+            {
+                "date": today,
+                "total_sessions": sessions.count(),
+                "total_work_seconds": int(total_seconds.total_seconds())
+                if hasattr(total_seconds, "total_seconds")
+                else int(total_seconds),
+            },
+            status=status.HTTP_200_OK,
+        )
