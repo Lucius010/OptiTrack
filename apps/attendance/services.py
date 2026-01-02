@@ -1,87 +1,158 @@
+from datetime import datetime, timedelta
+from typing import Optional
+
+from django.db import transaction
 from django.utils import timezone
-from django.core.exceptions import ValidationError
-from decimal import Decimal
-from .models import WorkSession
 
-class AttendanceService:
+from apps.attendance.exceptions import (
+    AttendanceError,
+    AlreadyClockedInError,
+    NotClockedInError,
+)
+from apps.attendance.models import WorkSession, AttendanceDaySummary
+from apps.users.models import Employee
+
+
+def _now(when: Optional[datetime] = None) -> datetime:
+    """Return an aware datetime in the current timezone."""
+    return when if when is not None else timezone.now()
+
+
+@transaction.atomic
+def clock_in(
+    employee: Employee,
+    source: str = "WEB",
+    when: Optional[datetime] = None,
+) -> WorkSession:
     """
-    Business logic for clock-in, clock-out, and earnings calculation.
+    Start a new work session for an employee.
+
+    Raises:
+        AlreadyClockedInError: if there is an open session.
     """
+    when = _now(when)
 
-    @staticmethod
-    def clock_in(employee, source="WEB"):
-        """
-        Starts a new work session if the employee isn't already clocked in.
-        """
-        # ==========================================================
-        # RULE: Check for existing active sessions
-        # ==========================================================
-        active_session = WorkSession.objects.filter(
-            employee=employee, 
-            clock_out_at__isnull=True
-        ).exists()
+    # Lock rows to avoid race conditions with concurrent requests.
+    open_session = (
+        WorkSession.objects
+        .select_for_update()
+        .filter(employee=employee, clock_out_at__isnull=True)
+        .first()
+    )
+    if open_session:
+        raise AlreadyClockedInError("Employee already has an open work session.")
 
-        if active_session:
-            raise ValidationError("You are already clocked in. Please clock out first.")
+    work_date = when.date()
 
-        # Create and return the session
-        return WorkSession.objects.create(
-            employee=employee,
-            work_date=timezone.now().date(),
-            clock_in_at=timezone.now(),
-            clock_in_source=source
-        )
+    session = WorkSession.objects.create(
+        employee=employee,
+        clock_in_at=when,
+        clock_in_source=source,
+        work_date=work_date,
+        total_work_duration=timedelta(0),
+        is_overtime=False,
+    )
 
-    @staticmethod
-    def clock_out(employee, source="WEB"):
-        """
-        Ends the current active session and calculates duration.
-        """
-        # Highlight: Find the most recent session without a clock-out time
-        try:
-            session = WorkSession.objects.get(
-                employee=employee, 
-                clock_out_at__isnull=True
-            )
-        except WorkSession.DoesNotExist:
-            raise ValidationError("No active session found. Please clock in first.")
+    _update_daily_summary_for_session(session)
 
-        # Highlight: Finalize the session
-        session.clock_out_at = timezone.now()
-        session.clock_out_source = source
-        
-        # Django handles the duration calculation automatically
-        session.total_work_duration = session.clock_out_at - session.clock_in_at
-        session.save()
-        return session
+    return session
 
-    @staticmethod
-    def calculate_earnings(session):
-        """
-        Calculates pay based on the Pay Type set in the Employee model.
-        ==========================================================
-        NEW: Professional Pay Engine
-        ==========================================================
-        """
-        employee = session.employee
-        # Convert duration to hours (as a Decimal for precision)
-        duration_hours = Decimal(session.total_work_duration.total_seconds()) / Decimal(3600)
-        
-        # 1. HOURLY LOGIC
-        if employee.pay_type == "HOURLY":
-            return round(duration_hours * employee.pay_rate, 2)
 
-        # 2. DAILY LOGIC
-        elif employee.pay_type == "DAILY":
-            # If they worked at least 1 hour, they get the full day rate
-            if duration_hours >= Decimal("1.0"):
-                return employee.pay_rate
-            return Decimal("0.00")
+@transaction.atomic
+def clock_out(
+    employee: Employee,
+    source: str = "WEB",
+    when: Optional[datetime] = None,
+) -> WorkSession:
+    """
+    Close the employee's open work session.
 
-        # 3. MONTHLY LOGIC
-        elif employee.pay_type == "MONTHLY":
-            # Typically handled by a separate monthly payroll run, 
-            # but we can return 0 or a prorated amount here.
-            return Decimal("0.00")
+    Raises:
+        NotClockedInError: if no open session exists.
+    """
+    when = _now(when)
 
-        return Decimal("0.00")
+    session = (
+        WorkSession.objects
+        .select_for_update()
+        .filter(employee=employee, clock_out_at__isnull=True)
+        .first()
+    )
+    if not session:
+        raise NotClockedInError("Employee does not have an open work session.")
+
+    if when <= session.clock_in_at:
+        # Defensive: ensure positive duration.
+        when = session.clock_in_at + timedelta(seconds=1)
+
+    session.clock_out_at = when
+    session.clock_out_source = source
+    session.total_work_duration = session.clock_out_at - session.clock_in_at
+    session.work_date = session.clock_in_at.date()
+    session.save(update_fields=[
+        "clock_out_at",
+        "clock_out_source",
+        "total_work_duration",
+        "work_date",
+        "updated_at",
+    ])
+
+    _update_daily_summary_for_session(session)
+
+    return session
+
+
+def _update_daily_summary_for_session(session: WorkSession) -> None:
+    """
+    Rebuild the AttendanceDaySummary for the session's employee and date.
+    """
+    employee = session.employee
+    work_date = session.work_date
+
+    sessions = WorkSession.objects.filter(
+        employee=employee,
+        work_date=work_date,
+        clock_out_at__isnull=False,
+    )
+
+    total_work = timedelta(0)
+    for s in sessions:
+        if s.total_work_duration:
+            total_work += s.total_work_duration
+
+    expected = timedelta(hours=8)
+
+    summary, created = AttendanceDaySummary.objects.get_or_create(
+        employee=employee,
+        work_date=work_date,
+        defaults={
+            "expected_work_duration": expected,
+            "total_work_duration": total_work,
+            "total_overtime_duration": max(total_work - expected, timedelta(0)),
+            "status": _compute_status(total_work, expected),
+        },
+    )
+
+    if not created:
+        summary.total_work_duration = total_work
+        summary.expected_work_duration = expected
+        summary.total_overtime_duration = max(total_work - expected, timedelta(0))
+        summary.status = _compute_status(total_work, expected)
+        summary.save(update_fields=[
+            "total_work_duration",
+            "expected_work_duration",
+            "total_overtime_duration",
+            "status",
+            "updated_at",
+        ])
+
+
+def _compute_status(total_work: timedelta, expected: timedelta) -> str:
+    """
+    Simple status logic placeholder.
+
+    Later we extend this aight (e.g. LATE, HOLIDAY).
+    """
+    if total_work == timedelta(0):
+        return "ABSENT"
+    return "PRESENT"
