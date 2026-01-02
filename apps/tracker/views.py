@@ -17,16 +17,16 @@ class DashboardLiveView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        # Highlight: Uses the util we just wrote
         active_employees = get_currently_clocked_in_employees()
-        
-        # We reuse the EmployeeSerializer from the users app
         serializer = EmployeeSerializer(active_employees, many=True)
-        
-        return Response({
-            "count": len(active_employees),
-            "employees": serializer.data
-        }, status=status.HTTP_200_OK)
+        return Response(
+            {
+                "count": active_employees.count() if hasattr(active_employees, "count") else len(active_employees),
+                "employees": serializer.data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
 
 
 class DepartmentStatsView(APIView):
