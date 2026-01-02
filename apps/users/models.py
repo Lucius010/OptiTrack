@@ -31,17 +31,17 @@ class Employee(AbstractUser):
         ("DAILY", "Pay per Day"),
         ("MONTHLY", "Monthly Salary"),
     ]
-    
+
     pay_type = models.CharField(
         max_length=10,
         choices=PAY_TYPE_CHOICES,
-        default="Monthly",
+        default="MONTHLY",  # must match choices
     )
     pay_rate = models.DecimalField(
-        max_digits=12, 
-        decimal_places=2, 
+        max_digits=12,
+        decimal_places=2,
         default=0.00,
-        help_text="The monetary value based on the Pay Type."
+        help_text="Base rate used for pay estimates (not full payroll).",
     )
 
     department = models.ForeignKey(
