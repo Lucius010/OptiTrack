@@ -26,6 +26,8 @@ class EmployeeAdmin(UserAdmin):
                 "department",
                 "role",
                 "employment_status",
+                "pay_type",
+                "pay_rate",
                 "hire_date",
                 "termination_date",
                 "timezone",

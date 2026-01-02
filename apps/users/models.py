@@ -26,6 +26,24 @@ class Role(models.Model):
 class Employee(AbstractUser):
     employee_code = models.CharField(max_length=50, unique=True)
 
+    PAY_TYPE_CHOICES = [
+        ("HOURLY", "Pay per Hour"),
+        ("DAILY", "Pay per Day"),
+        ("MONTHLY", "Monthly Salary"),
+    ]
+    
+    pay_type = models.CharField(
+        max_length=10,
+        choices=PAY_TYPE_CHOICES,
+        default="Monthly",
+    )
+    pay_rate = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        default=0.00,
+        help_text="The monetary value based on the Pay Type."
+    )
+
     department = models.ForeignKey(
         Department,
         on_delete=models.PROTECT,

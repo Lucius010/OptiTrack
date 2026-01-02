@@ -86,16 +86,13 @@ class AttendanceDaySummary(models.Model):
         ("HOLIDAY", "Holiday"),
     ]
 
-    employee = models.ForeignKey(
-        Employee,
-        on_delete=models.CASCADE,
-        related_name="daily_summaries",
-    )
+    employee = models.ForeignKey('users.Employee', on_delete=models.CASCADE)
     work_date = models.DateField()
 
     total_work_duration = models.DurationField(default=timedelta)
     total_overtime_duration = models.DurationField(default=timedelta)
     expected_work_duration = models.DurationField(default=timedelta)
+    total_earnings = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
 
     status = models.CharField(
         max_length=20,
