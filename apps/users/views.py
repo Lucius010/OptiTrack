@@ -1,46 +1,57 @@
-from rest_framework import viewsets, status
+from rest_framework import viewsets
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
+
 from .models import Department, Role, Employee
 from .serializers import DepartmentSerializer, RoleSerializer, EmployeeSerializer
 
-# ==========================================================
-# 1. DEPARTMENT VIEWSET
-# ==========================================================
 class DepartmentViewSet(viewsets.ModelViewSet):
+    """
+    Manage departments.
+
+    - Authenticated users can list/retrieve (for dropdowns, etc.).
+    - Only admins can create/update/delete.
+    """
     queryset = Department.objects.all()
     serializer_class = DepartmentSerializer
-    permission_classes = [IsAuthenticated] # Managers/Staff can view depts
 
+    def get_permissions(self):
+        if self.action in ["create", "update", "partial_update", "destroy"]:
+            return [IsAdminUser()]
+        return [IsAuthenticated()]
 
-# ==========================================================
-# 2. ROLE VIEWSET
-# ==========================================================
 class RoleViewSet(viewsets.ModelViewSet):
+    """
+    Manage roles.
+
+    - Authenticated users can list/retrieve.
+    - Only admins can create/update/delete.
+    """
     queryset = Role.objects.all()
     serializer_class = RoleSerializer
-    permission_classes = [IsAuthenticated]
 
+    def get_permissions(self):
+        if self.action in ["create", "update", "partial_update", "destroy"]:
+            return [IsAdminUser()]
+        return [IsAuthenticated()]
 
-# ==========================================================
-# 3. EMPLOYEE VIEWSET
-# ==========================================================
 class EmployeeViewSet(viewsets.ModelViewSet):
     """
-    Handles all Employee logic: listing, details, and updates.
+    View and manage employees.
+
+    - Non-staff users can only see (and potentially update) their own record.
+    - Admins can see and manage all employees.
     """
     queryset = Employee.objects.all()
     serializer_class = EmployeeSerializer
 
-    # Highlight: Custom permissions
     def get_permissions(self):
-        # Only Admins can delete or create employees
-        if self.action in ['create', 'destroy']:
+        # Only admins can create or delete employees
+        if self.action in ["create", "destroy"]:
             return [IsAdminUser()]
-        # Any logged-in user can view the list
+        # Authenticated users can list/retrieve/update within their queryset
         return [IsAuthenticated()]
 
-    # Highlight: Filter to see only current user's profile if not admin
     def get_queryset(self):
         user = self.request.user
         if user.is_staff:
