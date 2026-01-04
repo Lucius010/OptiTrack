@@ -9,3 +9,10 @@ venv/
 __pycache__/
 *.py[cod]
 db.sqlite3
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
