@@ -1,0 +1,11 @@
+# Virtualenv
+venv/
+.venv/
+
+# Django secret/env
+.env
+
+# Django noise
+__pycache__/
+*.py[cod]
+db.sqlite3
